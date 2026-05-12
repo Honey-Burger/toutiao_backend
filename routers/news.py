@@ -64,7 +64,6 @@ async def get_news_detail(
     news_detail = await news.get_news_detail(db, id)
     if not news_detail:#检查新闻是否存在，如果不存在，直接返回 404 给前端，终止后续流程
         raise HTTPException(status_code=404, detail="新闻不存在")
-
     views_res = await news.increase_news_views(db, news_detail.id)
     if not views_res:#检查更新操作是否真的命中了数据。
         raise HTTPException(status_code=404, detail="新闻不存在")
