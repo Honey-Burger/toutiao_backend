@@ -4,8 +4,10 @@ from starlette import status
 
 from config.db_config import get_database
 from crud.users import create_token
-from schemas.users import UserRequest
+from schemas.users import UserRequest, UserAuthResponse, UserInfoResponse
 from crud import users
+from utils.response import success_response
+
 router = APIRouter(prefix = "/api/user", tags =["users"])
 
 @router.post("/register")
@@ -16,16 +18,23 @@ async def register(user_data: UserRequest,db: AsyncSession = Depends(get_databas
       raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="用户已存在")
     user = await users.create_user(db, user_data)
     token =await users.create_token(db,user.id)
-    return {
-  "code": 200,
-  "message": "注册成功",
-  "data": {
-    "token": token,
-    "userInfo": {
-      "id": user.id,
-      "username":user.username,
-      "bio": user.bio,
-      "avatar": user.avatar
-    }
-  }
-}
+#     return {
+#   "code": 200,
+#   "message": "注册成功",
+#   "data": {
+#     "token": token,
+#     "userInfo": {
+#       "id": user.id,
+#       "username":user.username,
+#       "bio": user.bio,
+#       "avatar": user.avatar
+#     }
+#   }
+# }
+    response_data = UserAuthResponse(
+        token = token,
+        userInfo = UserInfoResponse.model_validate(user)
+        #直接接收ORM对象，转换成前端能看懂的 JSON 模型
+        #这里useInfo只会存UserInfoResponse类里定义的字段，未定义的不会显示，会直接被过滤掉
+    )
+    return success_response(message = "注册成功", data = response_data)

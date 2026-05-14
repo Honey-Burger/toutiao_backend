@@ -1855,7 +1855,7 @@ class UserRequest(BaseModel):
 
 
 
-#### （2）用户注册
+#### （2）用户注册-创建用户
 
 整体思路：
 
@@ -1875,7 +1875,7 @@ class UserRequest(BaseModel):
 结束
 ```
 
-这节重点是注册密码的加密环节：
+这节重点是**注册密码的加密环节**：
 
 首先在utls里创建security.py，
 
@@ -1919,3 +1919,188 @@ async def create_user(db: AsyncSession, user_data: UserRequest):
 - `db.add()`：仅将对象加入**会话缓存**，未写入数据库
 - `db.commit()`：将缓存写入数据库，但**内存中的对象不会自动更新**
 - `db.refresh()`：主动去数据库查询当前对象，把最新数据覆盖到内存对象
+
+
+
+#### （3）用户注册-生成Token
+
+Token:是服务器发给客户端的一段字符串，用来在后续请求中证明"你已经登录过了"
+
+作用：解决HTTP是无状态的问题，在每次请求中“自我证明身份”
+
+Token在请求中的位置：**请求头**
+
+`Authorization: Bearer <token>`
+
+`Authorization`:专门用来存放身份信息
+
+`Bearer`:表示“持有者令牌”
+
+`<token>`:真正的身份凭证
+
+
+
+#### （4）封装通用成功响应格式
+
+大致流程为下：抽取响应结果→定义数据类型→调用函数响应结果
+
+- **抽取响应结果**
+
+首先先封装响应结果：
+
+```python
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import JSONResponse
+def success_response(message: str = "success", data = None):
+    content = {
+        "code": 200,
+        "message": message,
+        "data": data
+    }
+    #data的数据格式多变，重点是data的数据结构怎么定义。通过schemas/users.py中的UserAuthResponse类定义
+
+    #目标：把任何的FastAPI、Pydantic、ORM 对象都要正常响应 → code、message、data
+    return JSONResponse(content=jsonable_encoder( content))
+    #jsonable_encode 就是把「Python 不能转成 JSON 的东西」变成「能转成 JSON 的东西」
+    #JSONResponse = 告诉前端：我给你返回的是 JSON 格式！
+```
+
+这里定义了`success_response()`方法，将参数以及响应给前端的东西写进方法体里面。统一赋值给content，最后return给前端。
+
+但这里发现，message的类型很好注解，但是传进来的data类型是多变的。那**怎么解决data的数据类型呢？**
+
+
+
+- **定义数据类型**
+
+在schemas文件夹中的users.py，来解决这个问题。我们在原来的基础上，分别定义了三个类：
+
+`UserInfoBase(BaseModel)`，`UserInfoResponse(UserInfoBase)`，`UserAuthResponse(BaseModel)`
+
+```python
+from typing import Optional
+
+from pydantic import BaseModel, Field, ConfigDict
+
+
+#类型校验代码
+class UserRequest(BaseModel):
+    username: str
+    password: str
+
+#user_ info 对应的类：基础类 + Info 类 （id、用户名）
+class UserInfoBase(BaseModel):
+    nickname: Optional[str] = Field(None, max_length=50, description="用户昵称")
+    avatar: Optional[str] = Field(None, max_length=255, description="用户头像地址")
+    gender: Optional[str] = Field(None, max_length=10, description="用户性别")
+    bio: Optional[str] = Field(None, max_length=500, description="个人简介")
+
+class UserInfoResponse(UserInfoBase):
+    id: int
+    username: str
+    # 模型类配置
+    model_config = ConfigDict(
+        from_attributes=True,  # 允许从 ORM 对象获取值
+    )
+#data 数据类型
+class UserAuthResponse(BaseModel):
+    token: str
+    user_info: UserInfoResponse = Field(..., alias = "userInfo")
+
+    #模型类配置
+    model_config = ConfigDict(
+        populate_by_name = True, #alas / 字段名兼容
+        #你可以写 UserAuthResponse(user_info=xxx) ✅
+        #也可以写 UserAuthResponse(userInfo=xxx) ✅
+        from_attributes = True,# 允许从 ORM 对象获取值
+    )
+```
+
+先写一个最基础的类`UserInfoBase(BaseModel)`，里面定义的是经常要用到的数据，后面要特别定义的类，直接继承就可以。
+
+然后定义类`UserInfoResponse(UserInfoBase)`，这个类就是在基础类的基础上特别定义了一个类。留着后面用来过滤我们从数据库取出来的ORM对象的字段，只留下我们在这个类里面定义的字段。
+
+最后定义类`UserAuthResponse(BaseModel)`，这个类最终决定我们返回给前端的data的数据类型。其中有token，还有`UserInfoResponse(UserInfoBase)`里面定义的字段。
+
+
+
+- **调用函数响应结果**
+
+定义了data的数据类型，也定义了返回函数`success_response`，最终都要在路由函数里面统一调用：
+
+```python
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.ext.asyncio import AsyncSession
+from starlette import status
+
+from config.db_config import get_database
+from crud.users import create_token
+from schemas.users import UserRequest, UserAuthResponse, UserInfoResponse
+from crud import users
+from utils.response import success_response
+
+router = APIRouter(prefix = "/api/user", tags =["users"])
+
+@router.post("/register")
+async def register(user_data: UserRequest,db: AsyncSession = Depends(get_database)):
+    # 注册逻辑：验证数据库是否存在，创建用户，生成Token，响应结果
+    exciting_user =  await users.get_user_by_username(db, user_data.username)
+    if exciting_user:
+      raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="用户已存在")
+    user = await users.create_user(db, user_data)
+    token =await users.create_token(db,user.id)
+#     return {
+#   "code": 200,
+#   "message": "注册成功",
+#   "data": {
+#     "token": token,
+#     "userInfo": {
+#       "id": user.id,
+#       "username":user.username,
+#       "bio": user.bio,
+#       "avatar": user.avatar
+#     }
+#   }
+# }
+    response_data = UserAuthResponse(
+        token = token,
+        userInfo = UserInfoResponse.model_validate(user)
+        #直接接收ORM对象，转换成前端能看懂的 JSON 模型
+        #这里useInfo只会存UserInfoResponse类里定义的字段，未定义的不会显示，会直接被过滤掉
+    )
+    return success_response(message = "注册成功", data = response_data)
+```
+
+这里我将原先的响应格式作注释，用来对比，可以很明显发现，现在响应体格式都被封装了起来，而且调整起来更加灵活，只需要在路由函数里调用`success_response(message = "注册成功", data = response_data)`即可。
+
+这里是将`response_data`赋值给`data`，这里重点看`response_data`的数据类型是怎么定义的。
+
+可以看到，对象`response_data`的数据类型是`UserAuthResponse`，也就是里面包含`token`，和一个`UserInfoResponsed`对象`userInfo`。而`userInfo`对象里面包含了其类定义的字段。
+
+那么`UserInfoResponse.model_validate(user)`**是干嘛的呢**？
+
+这里是根据`UserInfoResponse`定义的字段，**对从数据库里拿出来的ORM对象里的字段进行筛选**。`UserInfoResponse`类里定义的字段将**进行保留**，赋给`UserInfo`对象，而其他字段（密码、id等等）将直接过滤掉。
+
+- 运行测试结果
+
+这里随便注册一个用户，看看docs文档响应结果：
+
+```
+{
+  "code": 200,
+  "message": "注册成功",
+  "data": {
+    "token": "21b4055f-dd30-4531-9975-d85a01e4791e",
+    "userInfo": {
+      "nickname": null,
+      "avatar": "https://fastly.jsdelivr.net/npm/@vant/assets/cat.jpeg",
+      "gender": "unknown",
+      "bio": "这个人很懒，什么都没留下",
+      "id": 13,
+      "username": "wjy863"
+    }
+  }
+}
+```
+
+可以看出来，响应体严格执行了我们定义的响应格式。这种封装可以使代码解耦，响应函数也可以在后续中通用，非常方便。
