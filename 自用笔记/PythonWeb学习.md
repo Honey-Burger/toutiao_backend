@@ -2104,3 +2104,143 @@ async def register(user_data: UserRequest,db: AsyncSession = Depends(get_databas
 ```
 
 可以看出来，响应体严格执行了我们定义的响应格式。这种封装可以使代码解耦，响应函数也可以在后续中通用，非常方便。
+
+
+
+#### （5）封装全局异常处理器
+
+全局异常处理器是注册在FastAPI应用级别的**异常处理函数**，用于捕获业务层、数据库层以及系统抛出的异常，并以**统一的响应格式返回给前端**。
+
+大致为两个步骤：定义异常处理器 → 全局注册异常处理器
+
+- **定义异常处理器**
+
+这里先写4个异常处理器，分贝负责业务层报错、数据完整性约束、数据库层面的报错以及全局错误。
+
+全局异常处理是**通用工具类代码**，所里这里在文件夹utils里面创建exception.py
+
+```python
+import traceback
+from fastapi import HTTPException, Request
+from fastapi.responses import JSONResponse
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
+from starlette import status
+
+# 开发模式：返回详细错误信息
+# 生产模式：返回简化错误信息
+DEBUG_MODE = True  # 数字项目保持开启
+
+async def http_exception_handler(request: Request, exc: HTTPException):
+    # 处理 HTTPException 异常
+    # HTTPException 通常是业务逻辑主动抛出的，data 保持 None
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "code": exc.status_code,
+            "message": exc.detail,
+            "data": None
+        }
+    )
+
+async def integrity_error_handler(request: Request, exc: IntegrityError):
+    # 处理数据库完整性约束错误
+    error_msg = str(exc.orig)
+
+    # 判断具体的约束错误类型
+    if "username_UNIQUE" in error_msg or "Duplicate entry" in error_msg:
+        detail = "用户名已存在"
+    elif "FOREIGN KEY" in error_msg:
+        detail = "关联数据不存在"
+    else:
+        detail = "数据约束冲突，请检查输入"
+
+    # 开发模式下返回详细错误信息
+    error_data = None
+    if DEBUG_MODE:
+        error_data = {
+            "error_type": type(exc).__name__,
+            "error_detail": str(exc),
+            "traceback": traceback.format_exc(),
+            "path": str(request.url)
+        }
+
+    return JSONResponse(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        content={
+            "code": 400,
+            "message": detail,
+            "data": error_data
+        }
+    )
+
+async def sqlalchemy_error_handler(request: Request, exc: SQLAlchemyError):
+    # 处理 SQLAlchemy 数据库错误
+    # 开发模式下返回详细错误信息
+    error_data = None
+    if DEBUG_MODE:
+        error_data = {
+            "error_type": type(exc).__name__,
+            "error_detail": str(exc),
+            "traceback": traceback.format_exc(),
+            "path": str(request.url)
+        }
+
+    return JSONResponse(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        content={
+            "code": 500,
+            "message": "数据库操作失败，请稍后重试",
+            "data": error_data
+        }
+    )
+
+async def general_exception_handler(request: Request, exc: Exception):
+    # 处理所有未捕获的异常
+    # 开发模式下返回详细错误信息
+    error_data = None
+    if DEBUG_MODE:
+        error_data = {
+            "error_type": type(exc).__name__,
+            "error_detail": str(exc),
+            # 格式化异常信息为字典，方便日志记录和调试
+            "traceback": traceback.format_exc(),
+            "path": str(request.url)
+        }
+
+    return JSONResponse(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        content={
+            "code": 500,
+            "message": "服务器内部错误",
+            "data": error_data
+        }
+    )
+```
+
+这里4种异常函数就写好了，接下来就是怎么调用的事情。
+
+- **全局注册异常处理器**
+
+这里我们要调用异常处理器，首先就要将其注册。但4种函数我们不能一一在main函数进行注册，这不符合工程化的思想。这里我们在utils再创建exception_handlers.py，编写一个函数专门负责注册异常处理函数，然后在main函数里面调用它。
+
+```python
+from utils.exception import http_exception_handler, integrity_error_handler, general_exception_handler, \
+    sqlalchemy_error_handler
+
+sqlalchemy_error_handler
+from fastapi import HTTPException
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
+
+
+def register_exception_handlers(app):
+    """
+    注册全局异常处理：子类在前，父类在后；具体在前，抽象在后
+    """
+    app.add_exception_handler(HTTPException, http_exception_handler)#(异常类型，处理函数)，是业务层的报错
+    app.add_exception_handler(IntegrityError, integrity_error_handler)#数据完整性约束
+    app.add_exception_handler(SQLAlchemyError, sqlalchemy_error_handler)#数据库层面的错误
+    app.add_exception_handler(Exception, general_exception_handler)#全局错误，兜底用
+
+```
+
+最后在main函数添加`register_exception_handlers(app)`，调用注册函数，这样一个封装的全局异常处理器就可以在测试中使用了。
