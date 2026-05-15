@@ -2244,3 +2244,52 @@ def register_exception_handlers(app):
 ```
 
 最后在main函数添加`register_exception_handlers(app)`，调用注册函数，这样一个封装的全局异常处理器就可以在测试中使用了。
+
+
+
+#### （6）用户登录
+
+登录逻辑：验证数据库是否存在用户，验证密码，生成Token，响应结果
+
+路由函数添加：
+
+```python
+@router.post("/login")
+async def login(user_data: UserRequest,db: AsyncSession = Depends(get_database)):
+    # 登录逻辑：验证数据库是否存在用户，验证密码，生成Token，响应结果
+    user = await users.authenticate_user(db, user_data.username, user_data.password)
+    if not user:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="用户名或密码错误")
+    token = await users.create_token(db,user.id)
+    response_data = UserAuthResponse(
+        token = token,
+        userInfo = UserInfoResponse.model_validate(user)
+    )
+    return success_response(message = "登录成功", data = response_data)
+```
+
+其中多了`users.authenticate_user()`函数，用来验证用户是否存在，密码是否正确。
+
+在crud/user.py中定义`users.authenticate_user()`：
+
+```python
+async def authenticate_user(db: AsyncSession, username: str, password: str):
+    user = await get_user_by_username(db, username)#获取用户(有可能没有)
+    if not user:#用户不存在,返回 None
+        return None
+    if not security.verify_password(password, user.password):#密码验证失败，返回 None
+        return None
+    return user#密码验证成功，返回用户对象
+```
+
+可以发现，这里面多了一个新函数`security.verify_password()`，这个函数是用来验证用户输入密码是否和数据库里的密码一样的。
+
+这里将在utils/security.py 定义函数：
+
+```python
+def verify_password(plain_password, hashed_password):
+    return pwd_context.verify(plain_password, hashed_password)
+    # 验证密码,返回值为布尔值
+```
+
+这样用户登录的基本逻辑就实现完成。

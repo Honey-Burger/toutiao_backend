@@ -39,3 +39,11 @@ async def create_token(db: AsyncSession, user_id: int):
         db.add(user_token)
         await db.commit()
     return token#返回最新生成的 Token
+
+async def authenticate_user(db: AsyncSession, username: str, password: str):
+    user = await get_user_by_username(db, username)#获取用户(有可能没有)
+    if not user:#用户不存在,返回 None
+        return None
+    if not security.verify_password(password, user.password):#密码验证失败，返回 None
+        return None
+    return user#密码验证成功，返回用户对象
