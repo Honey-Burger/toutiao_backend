@@ -22,7 +22,7 @@ async_engine = create_async_engine(#异步引擎的配置
 class Base(DeclarativeBase):#创建基类
     create_time : Mapped[datetime] = mapped_column(
         DateTime,
-        nsert_default=func.now(),
+        insert_default=func.now(),
         default=func.now, comment = "创建时间")
     update_time : Mapped[datetime] = mapped_column(
         DateTime,

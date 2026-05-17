@@ -47,3 +47,21 @@ async def authenticate_user(db: AsyncSession, username: str, password: str):
     if not security.verify_password(password, user.password):#密码验证失败，返回 None
         return None
     return user#密码验证成功，返回用户对象
+
+#根据 Token 查询用户 ： 验证 Token → 验证用户
+async def get_user_by_token(db: AsyncSession, token: str):
+    query = select(UserToken).where(UserToken.token == token)
+    result = await db.execute(query)
+    db_token = result.scalar_one_or_none()
+    if not db_token or db_token.expires_at < datetime.now():
+        return None
+
+    query = select(User).where(User.id == db_token.user_id)
+    result = await db.execute(query)
+    return result.scalar_one_or_none()
+    """
+    这里为什么还要使用scalar_one_or_none()：
+    如果数据库出现脏数据（比如 user_id 重复），
+    scalar_one() 会直接炸，
+    而 scalar_one_or_none() 至少能让你拿到 None，再在调用层处理。
+    """

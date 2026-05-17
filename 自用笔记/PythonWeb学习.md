@@ -2293,3 +2293,71 @@ def verify_password(plain_password, hashed_password):
 ```
 
 这样用户登录的基本逻辑就实现完成。
+
+
+
+#### （7）获取用户信息
+
+整体思路：查Token用户 → 封装CRUD → 在路由函数中调用
+
+首先在crud/users.py里定义函数`get_user_by_token(db: AsyncSession, token: str)`：
+
+```python
+#根据 Token 查询用户 ： 验证 Token → 验证用户
+async def get_user_by_token(db: AsyncSession, token: str):
+    query = select(UserToken).where(UserToken.token == token)
+    result = await db.execute(query)
+    db_token = result.scalar_one_or_none()
+    if not db_token or db_token.expires_at < datetime.now():
+        return None
+
+    query = select(User).where(User.id == db_token.user_id)
+    result = await db.execute(query)
+    return result.scalar_one_or_none()
+    """
+    这里为什么还要使用scalar_one_or_none()：
+    如果数据库出现脏数据（比如 user_id 重复），
+    scalar_one() 会直接炸，
+    而 scalar_one_or_none() 至少能让你拿到 None，再在调用层处理。
+    """
+```
+
+这里引申出一个思路，我们发现。获取用户信息需要查询用户Token，返回用户对象，修改用户信息也需要返回用户对象，删除用户信息也需要返回用户对象，那么就可以把获取用户**封装成一个通用函数**，放在文件夹utils里。
+
+我们创建utils/auth.py，代码如下：
+
+```python
+#整合 根据 Token 查询用户，返回用户
+from fastapi import Header, Depends,HTTPException
+from starlette import status
+from config.db_config import get_database
+from crud import users
+
+async def get_current_user(
+        authorization: str = Header(..., alias="Authorization"),
+        db = Depends(get_database)
+):
+    #前端传过来：Bearer eyJxxxxxxxxxxx.token.string, 这里只取token
+    token = authorization.replace("Bearer", "")
+    """
+    方法二：token = authorization.split(" ")[1],也就是把列表分割，取后面那个。
+    """
+    user = await users.get_user_by_token(db, token)
+    if not user:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="无效的令牌或已经过期的的令牌")
+    return user
+```
+
+最后，在路由函数里调用函数：
+
+```python
+@router.get("/info")#查Token用户 → 封装CRUD → 功能整合成一个工具函数 → 路由导入使用：依赖注入
+async def get_user_info(user :User = Depends(get_current_user)):
+    return success_response(
+        message = "获取用户信息成功",
+        data = UserInfoResponse.model_validate( user))
+```
+
+这里采用依赖注入的方式调用`get_current_user`，只有 FastAPI 的路由函数 / 依赖函数 才能用依赖注入，普通函数则不行。
+
+依赖注入 = FastAPI 自动帮你调用函数、自动帮你传参，你只需要声明要什么，不用自己调用和传参。
