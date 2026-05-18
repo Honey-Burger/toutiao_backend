@@ -34,3 +34,11 @@ class UserAuthResponse(BaseModel):
         #也可以写 UserAuthResponse(userInfo=xxx) ✅
         from_attributes = True,# 允许从 ORM 对象获取值
     )
+
+#更新用户信息的模型类
+class UserUpdateRequest(BaseModel):
+    nickname: str = None
+    avatar: str = None
+    gender: str = None
+    bio: str = None
+    phone: str = None

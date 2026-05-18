@@ -4,7 +4,7 @@ from starlette import status
 
 from config.db_config import get_database
 from models.users import User
-from schemas.users import UserRequest, UserAuthResponse, UserInfoResponse
+from schemas.users import UserRequest, UserAuthResponse, UserInfoResponse, UserUpdateRequest
 from crud import users
 from utils.auth import get_current_user
 from utils.response import success_response
@@ -59,3 +59,13 @@ async def get_user_info(user :User = Depends(get_current_user)):
     return success_response(
         message = "获取用户信息成功",
         data = UserInfoResponse.model_validate( user))
+
+#修改用户信息：验证Token → 验证用户是否存在 → 修改用户信息（用户输入数据 put提交 → 请求体参数 → 定义Pydantic模型类）→ 响应结果
+#参数： 用户输入的 + 验证Token的 + db（调用更新的方法）
+@router.put("/info")
+async def update_user_info(user_data: UserUpdateRequest,
+                           user: User = Depends(get_current_user),
+                           db: AsyncSession = Depends(get_database)
+                           ):
+    # 修改用户信息逻辑：验证数据库是否存在用户，修改用户信息，响应结果
+    return success_response(message = "修改用户信息成功")

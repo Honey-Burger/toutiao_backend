@@ -2361,3 +2361,9 @@ async def get_user_info(user :User = Depends(get_current_user)):
 这里采用依赖注入的方式调用`get_current_user`，只有 FastAPI 的路由函数 / 依赖函数 才能用依赖注入，普通函数则不行。
 
 依赖注入 = FastAPI 自动帮你调用函数、自动帮你传参，你只需要声明要什么，不用自己调用和传参。
+
+
+
+#### （8）修改用户信息
+
+主要思路就是在查找用户的基之上修改对应的字段值，更新用户信息。
