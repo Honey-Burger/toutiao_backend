@@ -2367,3 +2367,69 @@ async def get_user_info(user :User = Depends(get_current_user)):
 #### （8）修改用户信息
 
 主要思路就是在查找用户的基之上修改对应的字段值，更新用户信息。
+
+常规思路就是先写更新函数。然后在路由函数里调用更新函数。
+
+但这里写更新函数时遇到一个新问题，我们怎么**精准的修改用户想修改的那些值，而不去动用户没有修改的那些值**呢？
+
+我们可以像之前写用户信息那样，再写一个Pydantic类，用来限制和校验前端传来的对象，然后通过检测对象中的哪些字段改了，哪些字段没改，来精准的进行修改操作。
+
+在schemas/users.py中定义`UserUpdateRequest(BaseModel)`模型类：
+
+```python
+class UserUpdateRequest(BaseModel):
+    nickname: str = None
+    avatar: str = None
+    gender: str = None
+    bio: str = None
+    phone: str = None
+```
+
+这里字段默认值都设置为None，这样哪个字段真正进行了改动，就不会为None，改动的时候我们把None过滤掉就行，不然原本有东西的字段也被修改为没有了。
+
+在crud/users.py中定义更新函数`update_user`
+
+```python
+#更新用户信息
+async def update_user(db: AsyncSession,username: str,
+                      user_data: UserUpdateRequest,
+                      ):
+    # update(User).where(User.name == username).values(字段 = 值)
+    # user_data 是一个Pydantic类型对象，必须进行解包变成字典才能变成字段=值的形式使用
+    #没有设置值的不更新
+    query = update(User).where(User.username == username).values(**user_data.model_dump(
+        exclude_unset= True,
+        exclude_none= True  ))#修改操作
+    result = await db.execute(query)#奖结果赋给result，以便后面检查是否真的进行了更新
+    await db.commit()
+    #检查更新
+    if result.rowcount == 0:#如果用户不存在，更新失败，抛出异常
+        raise HTTPException(status_code=404, detail="用户不存在")
+    #获取更新后的用户信息
+    updated_user = await get_user_by_username(db, username)
+    return updated_user
+```
+
+可以注意到，这里我们是两个实参。这个函数的重点是，怎么解决过滤字段的问题。
+
+在数据库操作中，我们可以发现`.values(**user_data.model_dump(exclude_unset= True,exclude_none= True  )`
+
+`model_dump`函数就是将Pydantic模型转换成字典，参数`exclude_unset= True`表示未设置的值都给过滤掉，参数`exclude_none= True`表示值为None的都给过滤掉。这和函数就直接解决了过滤字段的问题。
+
+然而ORM模型是接受不了字典的，需要接收字段=值的形式，所以这里前面还要加上**进行解包，才能使用。
+
+最后在routers/users.py写路由函数：
+
+```python
+#修改用户信息：验证Token → 验证用户是否存在 → 修改用户信息（用户输入数据 put提交 → 请求体参数 → 定义Pydantic模型类）→ 响应结果
+#参数： 用户输入的 + 验证Token的 + db（调用更新的方法）
+@router.put("/update")
+async def update_user_info(user_data: UserUpdateRequest,
+                           user: User = Depends(get_current_user),
+                           db: AsyncSession = Depends(get_database)
+                           ):
+    user = await users.update_user(db, user.username, user_data)
+    # 修改用户信息逻辑：验证数据库是否存在用户，修改用户信息，响应结果
+    return success_response(message = "更新用户信息成功", data=UserInfoResponse.model_validate(user))
+```
+

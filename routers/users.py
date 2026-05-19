@@ -62,10 +62,11 @@ async def get_user_info(user :User = Depends(get_current_user)):
 
 #修改用户信息：验证Token → 验证用户是否存在 → 修改用户信息（用户输入数据 put提交 → 请求体参数 → 定义Pydantic模型类）→ 响应结果
 #参数： 用户输入的 + 验证Token的 + db（调用更新的方法）
-@router.put("/info")
+@router.put("/update")
 async def update_user_info(user_data: UserUpdateRequest,
                            user: User = Depends(get_current_user),
                            db: AsyncSession = Depends(get_database)
                            ):
+    user = await users.update_user(db, user.username, user_data)
     # 修改用户信息逻辑：验证数据库是否存在用户，修改用户信息，响应结果
-    return success_response(message = "修改用户信息成功")
+    return success_response(message = "更新用户信息成功", data=UserInfoResponse.model_validate(user))

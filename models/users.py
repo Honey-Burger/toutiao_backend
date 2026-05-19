@@ -3,6 +3,8 @@ from typing import Optional
 from sqlalchemy import Index, Integer, String, Enum, DateTime, ForeignKey
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
+#都是SQLAlchemy模型类，数据库表结构
+
 class Base(DeclarativeBase):
     pass
 

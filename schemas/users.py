@@ -1,7 +1,7 @@
 from typing import Optional
 
 from pydantic import BaseModel, Field, ConfigDict
-
+#都是Pydantic 模型类，接口用的数据结构
 
 #类型校验代码
 class UserRequest(BaseModel):
