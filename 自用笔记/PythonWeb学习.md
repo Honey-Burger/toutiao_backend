@@ -2493,3 +2493,116 @@ async def update_user_password(
     return success_response(message = "修改密码成功")
 ```
 
+
+
+
+
+### 7、收藏模块
+
+#### （1）检查新闻收藏状态
+
+大致思路：先进入请求，验证用户是否登录，检查用户是否收藏当前新闻，响应结果。
+
+从路由函数下手，路由函数参数肯定要有news_id，user，然后进行检查操作，最后响应结果。
+
+接着分析crud的函数，里面需要路由函数传参，然后在数据库表里进行数据库操作。
+
+而数据库操作的语句要用到ORM模型类所以我们先写ORM模型类：
+
+在文件夹models里创建favorite.py
+
+```python
+from datetime import datetime
+from sqlalchemy import UniqueConstraint, Index, Integer, ForeignKey, DateTime
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from models.news import News
+from models.users import User
+
+class Base(DeclarativeBase):
+    pass
+
+class Favorite(Base):
+    """
+    收藏表ORM模型
+    """
+    __tablename__ = 'favorite'
+
+    # 创建索引 & 联合唯一约束：一个用户不能重复收藏同一篇新闻
+    #UniqueConstraint:唯一约束，当前用户，当前新闻，只能收藏一次
+    __table_args__ = (
+        UniqueConstraint('user_id', 'news_id', name='user_news_unique'),
+        Index('fk_favorite_user_idx', 'user_id'),
+        Index('fk_favorite_news_idx', 'news_id'),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True, comment="收藏ID")
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey(User.id), nullable=False, comment="用户ID")
+    news_id: Mapped[int] = mapped_column(Integer, ForeignKey(News.id), nullable=False, comment="新闻ID")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False, comment="收藏时间")
+
+    def __repr__(self):
+        return f"<Favorite(id={self.id}, user_id={self.user_id}, news_id={self.news_id}, created_at={self.created_at})>"
+```
+
+这样模型类创建好之后，就方便写数据库操作语句了。
+
+接下来在文件夹crud里面创建favorite.py：
+
+```python
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from models.favorite import Favorite
+
+
+async def is_news_favorite(db: AsyncSession,
+                           user_id: int,
+                           news_id: int
+):
+    query = select(Favorite).where(Favorite.user_id == user_id,Favorite.news_id == news_id)
+    result = await db.execute(query)
+    #是否有收藏记录
+    return result.scalar_one_or_none() is not None#判断语句：有收藏记录返回True，无收藏记录返回False
+```
+
+注意这里函数返回的是布尔类型的值，返回语句那里添加了一个 is not None，作用看代码里的解释。
+
+接下来就是路由函数，但是在写路由函数之前，我们要考虑返回给前端的语句中`success_response(message: str = "success", data = None)`的data怎么写。
+
+在API接口文档中，明确写出我们返回的数据类型是布尔型，但是即使这里只有一个返回值，我们还是要写Pydantic模型类，再将其塞到success_response函数中，统一格式。
+
+在schema中创建favorite.py：
+
+```python
+from pydantic import BaseModel, Field
+
+
+class FavoriteCheckResponse(BaseModel):
+    is_favorite: bool = Field(...,alias = "isFavorite")
+```
+
+最后完事具备，再编写路由函数，在routers文件夹里创建favorite.py：
+
+```python
+from fastapi import APIRouter, Query, Depends
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from config.db_config import get_database
+from crud import favorite
+from models.users import User
+from schemas.favorite import FavoriteCheckResponse
+from utils.auth import get_current_user
+from utils.response import success_response
+
+router = APIRouter(prefix="/api/favorite",tags=["favorite"])
+
+@router.get("/check")#检查新闻是否被收藏
+async def check_favorite(
+        news_id: int = Query(..., alias="newsId"),
+        user: User = Depends(get_current_user),
+        db: AsyncSession = Depends(get_database)
+):
+    is_favorite = await favorite.is_news_favorite(db, user.id, news_id)
+    return success_response(message="查询收藏状态成功",data = FavoriteCheckResponse(isFavorite = is_favorite))
+```
+
