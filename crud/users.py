@@ -88,3 +88,24 @@ async def update_user(db: AsyncSession,username: str,
     #获取更新后的用户信息
     updated_user = await get_user_by_username(db, username)
     return updated_user
+
+#修改密码： 验证旧密码 → 新密码加密 → 修改密码
+async def change_password(db: AsyncSession, user: User, old_password: str, new_password: str):
+    if not security.verify_password(old_password, user.password):
+        return False
+    hashed_new_pwd = security.get_hash_password(new_password)
+    user.password = hashed_new_pwd
+    db.add(user)
+    '''
+    当你在这个函数里修改 user.password = hashed_new_pwd 时，
+    只是改了 Python 对象的属性，并没有告诉当前的 db 会话 “我要更新这个对象”。
+    新的 db 会话并不知道这个 user 对象的存在，也不知道它被修改了。
+    对于已存在的数据库对象（不是新创建的），add() 不会执行 INSERT，
+    而是把这个对象关联到当前会话，让会话知道：
+    “这个对象被修改了，等下 commit() 的时候要帮我生成 UPDATE 语句。”
+    在异步会话里，只要是修改已存在的数据库对象，就必须先 db.add() 让会话 “看见” 它，
+    否则 commit() 不会生效。
+    '''
+    await db.commit()
+    await db.refresh(user)
+    return True

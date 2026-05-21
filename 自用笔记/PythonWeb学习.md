@@ -2433,3 +2433,63 @@ async def update_user_info(user_data: UserUpdateRequest,
     return success_response(message = "更新用户信息成功", data=UserInfoResponse.model_validate(user))
 ```
 
+
+
+#### （9）修改用户名密码
+
+大致思路：先进入请求，验证用户是否登录，登录之后再次验证密码，如果一致就将新密码转密文，更新密码，响应结果。
+
+鉴于密码属于隐私字段，所以不推荐直接以参数的方式被函数调用。因此我们`schemas/users.py`创建Pydantic模型类：
+
+```python
+class UserChangePasswordRequest(BaseModel):
+    old_password: str = Field(..., alias="oldPassword",description="旧密码")
+    new_password: str = Field(..., min_length=6,alias="newPassword",description="新密码")
+```
+
+这样可以保证密码字段不会直接裸露在外，而且可以对传进来的对象进行字段校验。
+
+
+
+写好模型类，进行修改密码的逻辑部分开发。在`crud/users.py`里增加函数`change_password（）`：、
+
+```python
+#修改密码： 验证旧密码 → 新密码加密 → 修改密码
+async def change_password(db: AsyncSession, user: User, old_password: str, new_password: str):
+    if not security.verify_password(old_password, user.password):
+        return False
+    hashed_new_pwd = security.get_hash_password(new_password)
+    user.password = hashed_new_pwd
+    db.add(user)
+    '''
+    当你在这个函数里修改 user.password = hashed_new_pwd 时，
+    只是改了 Python 对象的属性，并没有告诉当前的 db 会话 “我要更新这个对象”。
+    新的 db 会话并不知道这个 user 对象的存在，也不知道它被修改了。
+    对于已存在的数据库对象（不是新创建的），add() 不会执行 INSERT，
+    而是把这个对象关联到当前会话，让会话知道：
+    “这个对象被修改了，等下 commit() 的时候要帮我生成 UPDATE 语句。”
+    在异步会话里，只要是修改已存在的数据库对象，就必须先 db.add() 让会话 “看见” 它，
+    否则 commit() 不会生效。
+    '''
+    await db.commit()
+    await db.refresh(user)
+    return True
+```
+
+这里重点要理解`add(user)`的作用。
+
+这两个都写好了，直接添加到路由函数里进行调用：
+
+```python
+@router.put("/password")
+async def update_user_password(
+        password_data: UserChangePasswordRequest,
+        user: User = Depends(get_current_user),#验证Token,用户是否登录
+        db: AsyncSession = Depends(get_database)
+):
+    res_change_pwd = await users.change_password(db, user, password_data.old_password, password_data.new_password)
+    if not res_change_pwd:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="修改密码失败哦，待会再试")
+    return success_response(message = "修改密码成功")
+```
+

@@ -4,7 +4,7 @@ from starlette import status
 
 from config.db_config import get_database
 from models.users import User
-from schemas.users import UserRequest, UserAuthResponse, UserInfoResponse, UserUpdateRequest
+from schemas.users import UserRequest, UserAuthResponse, UserInfoResponse, UserUpdateRequest, UserChangePasswordRequest
 from crud import users
 from utils.auth import get_current_user
 from utils.response import success_response
@@ -70,3 +70,14 @@ async def update_user_info(user_data: UserUpdateRequest,
     user = await users.update_user(db, user.username, user_data)
     # 修改用户信息逻辑：验证数据库是否存在用户，修改用户信息，响应结果
     return success_response(message = "更新用户信息成功", data=UserInfoResponse.model_validate(user))
+
+@router.put("/password")
+async def update_user_password(
+        password_data: UserChangePasswordRequest,
+        user: User = Depends(get_current_user),#验证Token,用户是否登录
+        db: AsyncSession = Depends(get_database)
+):
+    res_change_pwd = await users.change_password(db, user, password_data.old_password, password_data.new_password)
+    if not res_change_pwd:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="修改密码失败哦，待会再试")
+    return success_response(message = "修改密码成功")
