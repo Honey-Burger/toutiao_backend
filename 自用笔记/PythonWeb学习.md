@@ -2606,3 +2606,88 @@ async def check_favorite(
     return success_response(message="查询收藏状态成功",data = FavoriteCheckResponse(isFavorite = is_favorite))
 ```
 
+
+
+#### （2）添加收藏
+
+大致思路：进入请求→验证用户是否登录→添加收藏→响应结果
+
+先建立Pydantic模型类：
+
+```python
+class FavoriteAddRequest(BaseModel):
+    news_id: int = Field(..., alias="newsId")
+```
+
+再编写操作函数：
+
+```python
+async def add_news_favorite(db: AsyncSession,
+                           user_id: int,
+                           news_id: int
+):
+    favorite = Favorite(user_id=user_id, news_id=news_id)
+    #创建ORM实例
+    db.add(favorite)
+    """
+    Favorite 实例是全新的、未被数据库管理的对象，
+    db.add() 的作用就是把它 “注册” 到当前会话，让 SQLAlchemy 知道要把它插入到数据库。
+    """
+    await db.commit()
+    await db.refresh(favorite)
+    return favorite
+```
+
+编写路由函数调用：
+
+```python
+@router.post("/add")
+async def add_favorite(
+        data: FavoriteAddRequest,
+        user: User = Depends(get_current_user),
+        db: AsyncSession = Depends(get_database)
+):
+    result = await favorite.add_news_favorite(db, user.id, data.news_id)
+    return success_response(message="添加收藏成功", data = result)
+```
+
+
+
+#### （3）取消收藏
+
+进入请求→验证用户是否登录→删除收藏表内当前新闻→检查命中结果＞0 → 响应结果
+
+逻辑函数：
+
+```python
+async def remove_news_favorite(db: AsyncSession,
+                           user_id: int,
+                           news_id: int
+):
+    favorite =Favorite(user_id=user_id, news_id=news_id)
+    if favorite:#如果收藏记录存在，则删除
+        stmt = delete(Favorite).where(Favorite.user_id == user_id,Favorite.news_id == news_id)
+        result = await db.execute(stmt)
+        await db.commit()
+        return result.rowcount > 0#删除成功返回True，否则返回False
+```
+
+这里返回布尔值
+
+路由函数：
+
+```python
+@router.delete("/remove")
+async def remove_favorite(
+        news_id: int = Query(..., alias="newsId"),
+        user: User = Depends(get_current_user),
+        db: AsyncSession = Depends(get_database)
+):
+    result = await favorite.remove_news_favorite(db, user.id, news_id)
+    if not result:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="收藏记录不存在")
+    return success_response(message="删除收藏成功", data = result)
+```
+
+这里接口文档要求的是路径参数，所以就不特意创建Pydantic模型类了
+

@@ -3,6 +3,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.db_config import get_database
 from crud import news
+from models.users import User
+from schemas.favorite import FavoriteAddRequest
+from utils.auth import get_current_user
+from utils.response import success_response
 
 #创建APIrouter实例
 # prefix 路由前缀 （主要根据API接口文档书写）
@@ -83,3 +87,5 @@ async def get_news_detail(
                 "relatedNews": related_news
             }
     }
+
+

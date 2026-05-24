@@ -81,3 +81,4 @@ async def update_user_password(
     if not res_change_pwd:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="修改密码失败哦，待会再试")
     return success_response(message = "修改密码成功")
+
