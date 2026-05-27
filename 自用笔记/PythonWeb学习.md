@@ -2691,7 +2691,248 @@ async def remove_favorite(
 
 这里接口文档要求的是路径参数，所以就不特意创建Pydantic模型类了
 
-#### （4）获取新闻列表
 
-大致思路：进入请求→验证用户是否登录→统计收藏总量→联表查询收藏新闻→是否有更多→响应结果
+
+#### （4）获取收藏列表
+
+在编写路由函数之前，我们先书写CRUD函数。
+
+在crud/favorite.py里创建函数`get_favorite_list`
+
+```python
+#获取收藏列表：获取某个用户的收藏列表 + 分页功能
+async def get_favorite_list(
+        db: AsyncSession,
+        user_id: int,
+        page: int = 1,
+        page_size: int = 10
+):
+    # 总量 + 收藏的新闻列表
+    count_query = select(func.count()).where(Favorite.user_id == user_id)
+    #这里的 func.count() 是聚合函数，数据库会计算后返回一行一列的结果
+    count_result = await db.execute(count_query)#执行 SQL
+    total = count_result.scalar_one()
+    
+    offset = (page - 1) * page_size
+    #获取收藏列表 - 联表查询 join() + 收藏时间排序 + 分页
+    #select(查询主体模型类，字段别名).join(联合查询的模型类，联合查询的条件).where(条件).order_by().offset().limit()
+    #别名： Favorite.created_at.label("favorite_time")
+    query = (select(News, Favorite.created_at.label("favorite_time"), Favorite.id.label("favorite_id"))
+                   .join(Favorite, Favorite.news_id == News.id).
+                   where(Favorite.user_id == user_id).order_by(Favorite.created_at.desc())#按照收藏的时间降序
+                   .offset(offset).limit(page_size)
+             )
+    result = await db.execute(query)
+    row = result.all()
+    return total, row
+'''row = [
+    (News对象1, datetime1, favorite_id1),
+    (News对象2, datetime2, favorite_id2),
+    (News对象3, datetime3, favorite_id3),
+    ...
+]
+'''
+```
+
+首先规定传进来4个参数，分别是数据库会话对象，用户id，页数和每页大小。
+
+这个函数目的是返回两个值：收藏新闻总数 total 和收藏的新闻列表 row 。两个返回值的作用将会在路由函数中详细说明。
+
+这里的重点是联表查询语句，首先我们先搞清楚这里使用的联表查询的**语法格式**：
+
+```python
+query = (select(News, Favorite.created_at.label("favorite_time"), Favorite.id.label("favorite_id")).join(Favorite, Favorite.news_id == News.id).
+where(Favorite.user_id == user_id).order_by(Favorite.created_at.desc())#按照收藏的时间降序
+.offset(offset).limit(page_size))
+```
+
+select(查询主体模型类，字段别名).join(联合查询的模型类，联合查询的条件).where(条件).order_by().offset().limit()。
+
+**首先，为什么要进行联表查询呢？**
+
+因为我们这里获取收藏新闻列表，不仅要知道新闻的收藏时间，新闻ID（在favorite表），还要知道这条新闻的作者，标题（在news表），很显然，这是一张表做不到的。
+
+所以我们把两张表贴在一起，这里就是把favorite表贴（join）在news表上，并且我们限制联合的条件是`Favorite.news_id == News.id`。
+
+**在where里已经书写条件了，为什么还要在联表查询里面书写条件**？
+
+两个条件各司其职
+
+JOIN 条件：`Favorite.news_id == News.id`，作用：**定义两张表怎么"拼接"**，这就像在说："把 favorite 表的每一行，和 news 表中 id 匹配的行连在一起"，如果没有这个条件，数据库不知道该怎么对应两张表的数据。
+
+WHERE 条件：`Favorite.user_id == user_id`，作用：**从拼接好的大表中"筛选"出需要的数据**，这就像在说："我只想要用户5的收藏记录"。
+
+**关于字段别名**：
+
+这里代码中写到`News, Favorite.created_at.label("favorite_time"), Favorite.id.label("favorite_id")`
+
+这里我们用`.label()`给这两个字段起了别名,但**为什么要起别名**呢？
+
+主要原因是因为字段名冲突，两张表都有 id 和 created_at 字段：
+
+`news.id` - 新闻ID
+
+`favorite.id` - 收藏记录ID
+
+`news.created_at` - 新闻创建时间
+
+`favorite.created_at` - 收藏时间
+
+如果不取别名，返回结果会有两个 id 和两个 created_at，数据库不知道哪个是哪个，会导致：
+数据覆盖（后面的覆盖前面的），前端拿到错误的值。
+
+这里数据库语句被执行之后，会将返回值给row，这里row的格式是元素为元祖的列表，每个元祖包含三个元素：
+
+```python
+'''row = [
+    (News对象1, datetime1, favorite_id1),
+    (News对象2, datetime2, favorite_id2),
+    (News对象3, datetime3, favorite_id3),
+    ...
+]
+'''
+```
+
+
+
+这里CRUD函数已经写完，此时应该去路由函数调用：
+
+```python
+@router.get("/list")
+async def get_favorite_list(
+        page: int = Query(1, ge=1),
+        page_size: int = Query(10, ge=1, le=100, alias="pageSize"),
+        user: User = Depends(get_current_user),
+        db: AsyncSession = Depends(get_database)
+):
+    favorite_list = [
+        {
+            **news.__dict__,
+            "favorite_time": favorite_time,
+            "favorite_id": favorite_id
+        } for news, favorite_time, favorite_id in rows
+    ]
+    has_more = total > page * page_size
+    rows, total =await favorite.get_favorite_list(db, user.id, page, page_size)
+    return success_response(message="获取收藏列表成功")
+```
+
+在上面我们说过，row是元祖的形式，我们需要**转换成字典的格式**，方便转JSON传给前端，所以这里直接对news对象进行解包，展开里面的所有属性，再加上后面两个属性（此时字段别名的作用体现出来），再用列表推导式将每一行数据都处理成我们需要格式。
+
+然后再加上一个变量`hasMore`，这个变量我们在获取新闻列表的时候就说到过，用来判断当前页的后面是否还有新闻。
+
+现在有一个问题，我们最终要向前端返回data，这个data是什么数据结构呢？total和row又有什么用？
+
+首先我们要明白我们最终要返回给前端什么东西，首先肯定是收藏的新闻列表，还有就是收藏总数，当然还要有`hasMore`，用来判断当前页的后面是否还有新闻，为bool类型。
+
+我们要返回东西看起来比较多，那么可以考虑封装为一个模型，还能起到验证作用。
+
+在schemas/favorite.py里面添加`FavoriteListResponse`类，
+
+但这里的 `list` 数组元素是一个新闻对象，我们写一个专门表示收藏列表里每条新闻的类 `FavoriteNewsItemResponse`。这个类的字段很多，且有一部分和之前的新闻模块重复，所以**抽一个基类**来提高复用：
+
+在 `schemas/base.py` 定义 `NewsItemBase`：
+
+```python
+from typing import Optional
+from datetime import datetime
+from pydantic import BaseModel, Field, ConfigDict
+
+class NewsItemBase(BaseModel):
+    id: int
+    title: str
+    description: Optional[str] = None
+    image: Optional[str] = None
+    author: Optional[str] = None
+    category_id: int = Field(alias="categoryId")
+    views: int
+    publish_time: Optional[datetime] = Field(None, alias="publishedTime")
+
+    model_config = ConfigDict(
+        from_attributes=True,   # 允许从 ORM 对象取值
+        populate_by_name=True   # 同时支持字段名和别名
+    )
+```
+
+然后在 `schemas/favorite.py` 里继承它：
+
+```python
+class FavoriteNewsItemResponse(NewsItemBase):
+    favorite_id: int = Field(alias="favoriteId")
+    favorite_time: datetime = Field(alias="favoriteTime")
+    model_config = ConfigDict(
+        populate_by_name=True,
+        from_attributes=True,
+    )
+
+class FavoriteListResponse(BaseModel):
+    list: list[FavoriteNewsItemResponse]
+    total: int
+    has_more: bool = Field(alias="hasMore")
+    model_config = ConfigDict(
+        populate_by_name=True,
+        from_attributes=True,
+    )
+```
+
+`FavoriteNewsItemResponse` = 新闻基础字段 + `favorite_id` + `favorite_time`，刚好对应联表查询返回的三元组。
+
+最后，修正路由函数里的顺序问题（先取数据，再构建列表）并传入 data：
+
+```python
+@router.get("/list")
+async def get_favorite_list(
+        page: int = Query(1, ge=1),
+        page_size: int = Query(10, ge=1, le=100, alias="pageSize"),
+        user: User = Depends(get_current_user),
+        db: AsyncSession = Depends(get_database)
+):
+    total, rows = await favorite.get_favorite_list(db, user.id, page, page_size)
+    favorite_list = [
+        {
+            **news.__dict__,
+            "favorite_time": favorite_time,
+            "favorite_id": favorite_id
+        } for news, favorite_time, favorite_id in rows
+    ]
+    has_more = total > page * page_size
+    data = FavoriteListResponse(
+        total=total,
+        hasMore=has_more,
+        list=favorite_list
+    )
+    return success_response(message="获取收藏列表成功", data=data)
+```
+
+**注意**：一定要 `total, rows = await ...` 写在列表推导式**之前**，不然变量未定义会报错。
+
+最终补全路由函数：
+
+
+
+```python
+@router.get("/list")
+async def get_favorite_list(
+        page: int = Query(1, ge=1),
+        page_size: int = Query(10, ge=1, le=100, alias="pageSize"),
+        user: User = Depends(get_current_user),
+        db: AsyncSession = Depends(get_database)
+):
+    rows, total =await favorite.get_favorite_list(db, user.id, page, page_size)
+    favorite_list = [
+        {
+            **news.__dict__,
+            "favorite_time": favorite_time,
+            "favorite_id": favorite_id
+        } for news, favorite_time, favorite_id in rows
+    ]
+    has_more = total > page * page_size
+    data = FavoriteListResponse(
+        total = total,
+        hasMore = has_more,
+        list = favorite_list
+    )
+    return success_response(message="获取收藏列表成功", data = data)
+```
+
 

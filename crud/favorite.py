@@ -48,16 +48,26 @@ async def get_favorite_list(
 ):
     # 总量 + 收藏的新闻列表
     count_query = select(func.count()).where(Favorite.user_id == user_id)
-    count_result = await db.execute(count_query)
+    #这里的 func.count() 是聚合函数，数据库会计算后返回一行一列的结果
+    count_result = await db.execute(count_query)#执行 SQL
     total = count_result.scalar_one()
     offset = (page - 1) * page_size
     #获取收藏列表 - 联表查询 join() + 收藏时间排序 + 分页
     #select(查询主体模型类，字段别名).join(联合查询的模型类，联合查询的条件).where(条件).order_by().offset().limit()
+    #别名： Favorite.created_at.label("favorite_time")
     query = (select(News, Favorite.created_at.label("favorite_time"), Favorite.id.label("favorite_id"))
                    .join(Favorite, Favorite.news_id == News.id).
-                   where(Favorite.user_id == user_id).order_by(Favorite.created_at.desc())
+                   where(Favorite.user_id == user_id).order_by(Favorite.created_at.desc())#按照收藏的时间降序
                    .offset(offset).limit(page_size)
              )
     result = await db.execute(query)
     row = result.all()
     return total, row
+'''row = [
+    (News对象1, datetime1, favorite_id1),
+    (News对象2, datetime2, favorite_id2),
+    (News对象3, datetime3, favorite_id3),
+    ...
+]
+'''
+

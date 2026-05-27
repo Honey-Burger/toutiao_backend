@@ -5,7 +5,7 @@ from starlette import status
 from config.db_config import get_database
 from crud import favorite
 from models.users import User
-from schemas.favorite import FavoriteCheckResponse, FavoriteAddRequest
+from schemas.favorite import FavoriteCheckResponse, FavoriteAddRequest, FavoriteListResponse
 from utils.auth import get_current_user
 from utils.response import success_response
 
@@ -48,4 +48,18 @@ async def get_favorite_list(
         user: User = Depends(get_current_user),
         db: AsyncSession = Depends(get_database)
 ):
-    return success_response(message="获取收藏列表成功")
+    rows, total =await favorite.get_favorite_list(db, user.id, page, page_size)
+    favorite_list = [
+        {
+            **news.__dict__,
+            "favorite_time": favorite_time,
+            "favorite_id": favorite_id
+        } for news, favorite_time, favorite_id in rows
+    ]
+    has_more = total > page * page_size
+    data = FavoriteListResponse(
+        total = total,
+        hasMore = has_more,
+        list = favorite_list
+    )
+    return success_response(message="获取收藏列表成功", data = data)
