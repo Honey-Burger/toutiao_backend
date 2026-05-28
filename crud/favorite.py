@@ -71,3 +71,12 @@ async def get_favorite_list(
 ]
 '''
 
+#清空收藏列表：当前用户的所有收藏
+async def remove_all_favorite(
+        db: AsyncSession,
+        user_id: int
+):
+    stmt=delete(Favorite).where(Favorite.user_id == user_id)
+    result = await db.execute(stmt)
+    await db.commit()
+    return result.rowcount or 0 #有数量就返回数量，没有数量就返回0

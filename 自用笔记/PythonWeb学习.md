@@ -2936,3 +2936,46 @@ async def get_favorite_list(
 ```
 
 
+
+#### （5）清空收藏列表
+
+大致思路：进入请求→验证用户是否登录→清空当前用户收藏新闻→响应结果
+
+CRUD函数：
+
+```python
+#清空收藏列表：当前用户的所有收藏
+async def remove_all_favorite(
+        db: AsyncSession,
+        user_id: int
+):
+    stmt=delete(Favorite).where(Favorite.user_id == user_id)
+    result = await db.execute(stmt)
+    await db.commit()
+    return result.rowcount or 0 #有数量就返回数量，没有数量就返回0
+```
+
+`delete(Favorite).where(...)`：**先筛选再删除**，只清空当前用户的收藏，不会误删别人的数据。
+
+`result.rowcount`：返回本次操作**影响的行数**（即删了多少条）。如果收藏表为空，`rowcount` 可能返回 `None`，所以用 `or 0` 兜底，保证返回数字。
+
+路由函数：
+
+```python
+@router.delete("/clear")
+async def clear_favorite(
+        user: User = Depends(get_current_user),
+        db: AsyncSession = Depends(get_database)
+):
+    count = await favorite.remove_all_favorite(db, user.id)
+    return success_response(message=f"清空了{count}条收藏记录")
+```
+
+这里不用传任何参数，**只依赖登录用户**，根据 Token 拿到 `user.id` 就能定位到该用户的所有收藏。返回消息里用 f-string 把删除条数带出来，方便前端展示。
+
+
+
+### 8、浏览记录模块
+
+#### （1）添加浏览历史
+
