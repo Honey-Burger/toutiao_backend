@@ -2979,3 +2979,315 @@ async def clear_favorite(
 
 #### （1）添加浏览历史
 
+大致思路：进入请求→验证用户是否登录→创建浏览记录→响应结果
+
+先写ORM模型类，在models文件夹里创建history.py：
+
+```python
+from datetime import datetime
+from sqlalchemy import UniqueConstraint, Index, Integer, ForeignKey, DateTime
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from models.news import News
+from models.users import User
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+class History(Base):
+    """
+    浏览记录表ORM模型
+    """
+    __tablename__ = 'history'
+
+    # 创建索引
+    __table_args__ = (
+        Index('fk_history_user_idx', 'user_id'),
+        Index('fk_history_news_idx', 'news_id'),
+        Index('idx_view_time', 'view_time'),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True, comment="浏览记录ID")
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey(User.id), nullable=False, comment="用户ID")
+    news_id: Mapped[int] = mapped_column(Integer, ForeignKey(News.id), nullable=False, comment="新闻ID")
+    view_time: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False, comment="浏览时间")
+
+    def __repr__(self):
+        return f"<History(id={self.id}, user_id={self.user_id}, news_id={self.news_id}, view_time={self.view_time})>"
+```
+
+浏览记录表有三个外键字段：`user_id` 关联用户表，`news_id` 关联新闻表，`view_time` 记录浏览时间。和收藏表不同，浏览记录表**没有设置唯一约束**，因为同一用户可能多次浏览同一篇新闻，每次都会产生一条新记录。
+
+接着写Pydantic请求模型，在schemas/history.py中定义：
+
+```python
+from pydantic import BaseModel, Field
+
+class HistoryAddRequest(BaseModel):
+    """
+    添加浏览记录的请求模型
+    用于接收前端传来的新闻ID
+    """
+    news_id: int = Field(..., alias="newsId")  # 新闻ID，必填字段，使用驼峰命名别名
+```
+
+然后编写CRUD函数，在crud/history.py中定义`add_news_history()`：
+
+```python
+from sqlalchemy import select, delete, func
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from models.history import History
+from models.news import News
+
+
+async def add_news_history(db: AsyncSession,
+                           user_id: int,
+                           news_id: int
+):
+    """添加浏览记录"""
+    history_record = History(user_id=user_id, news_id=news_id)
+    db.add(history_record)
+    await db.commit()
+    await db.refresh(history_record)
+    return history_record
+```
+
+这里逻辑比较直接：创建ORM对象 → `db.add()` 注册到会话 → `commit()` 写入数据库 → `refresh()` 获取数据库自增ID等字段 → 返回记录对象。
+
+最后编写路由函数，在routers/history.py中调用：
+
+```python
+from fastapi import APIRouter, Query, Depends, HTTPException
+from sqlalchemy.ext.asyncio import AsyncSession
+from starlette import status
+
+from config.db_config import get_database
+from crud import history
+from models.users import User
+from schemas.history import HistoryAddRequest
+from utils.auth import get_current_user
+from utils.response import success_response
+
+router = APIRouter(prefix="/api/history", tags=["history"])
+
+
+@router.post("/add")
+async def add_history(
+        data: HistoryAddRequest,
+        user: User = Depends(get_current_user),
+        db: AsyncSession = Depends(get_database)
+):
+    result = await history.add_news_history(db, user.id, data.news_id)
+    return success_response(message="添加浏览记录成功", data=result)
+```
+
+**重点**：浏览记录和收藏记录的差异——收藏表用 `UniqueConstraint` 约束同一用户+同一新闻只能有一条记录；而浏览记录**不加唯一约束**，用户每次浏览都会新增一条记录，这样可以保留用户完整的浏览轨迹。
+
+
+#### （2）获取浏览历史
+
+大致思路：进入请求→验证用户是否登录→联表查询（History + News）→分页+按浏览时间降序→返回总量、列表和是否有下一页
+
+在crud/history.py中定义`get_history_list()`：
+
+```python
+async def get_history_list(
+        db: AsyncSession,
+        user_id: int,
+        page: int = 1,
+        page_size: int = 10
+):
+    """获取浏览历史列表：获取某个用户的浏览历史 + 分页功能"""
+    # 总量统计
+    count_query = select(func.count()).where(History.user_id == user_id)
+    count_result = await db.execute(count_query)
+    total = count_result.scalar_one()
+
+    offset = (page - 1) * page_size
+
+    # 获取浏览历史列表 - 从 History 表开始查询，JOIN News 表获取新闻详情
+    query = (select(News,
+                    History.view_time.label("view_time"),
+                    History.id.label("history_id"))
+             .select_from(History)
+             .join(News, History.news_id == News.id)
+             .where(History.user_id == user_id)
+             .order_by(History.view_time.desc())
+             .offset(offset)
+             .limit(page_size)
+             )
+    result = await db.execute(query)
+    rows = result.all()
+
+    return total, rows
+```
+
+**重点**：这里的联表查询和收藏列表有所不同：
+
+- `.select_from(History)`：**显式指定以 History 表作为查询起点**（驱动表），然后 JOIN News 表。这与收藏列表的写法（`select(News).join(Favorite)`）等价，但 `select_from` 更明确地表达"以谁为主"。
+- `History.view_time.label("view_time")`：给浏览时间起别名，避免和 News 表里的时间字段冲突。
+- `History.id.label("history_id")`：给浏览记录ID起别名，因为 News 也有 id 字段。这个 `history_id` 会在删除单条记录时用到。
+- `order_by(History.view_time.desc())`：按浏览时间**降序**排列，最近浏览的排在最前面。
+
+然后编写响应模型。浏览历史的列表项需要新闻基本信息 + 浏览记录特有字段，这里直接复用 `schemas/base.py` 中的 `NewsItemBase`：
+
+```python
+from datetime import datetime
+from pydantic import BaseModel, Field, ConfigDict
+from schemas.base import NewsItemBase
+
+
+class HistoryNewsItemResponse(NewsItemBase):
+    """
+    浏览历史项响应模型
+    继承自 NewsItemBase，包含新闻基本信息 + 浏览记录特有字段
+    """
+    history_id: int = Field(alias="historyId")  # 浏览记录ID
+    view_time: datetime = Field(alias="viewTime")  # 浏览时间
+
+    model_config = ConfigDict(
+        populate_by_name=True,
+        from_attributes=True,
+    )
+
+
+class HistoryListResponse(BaseModel):
+    """
+    浏览历史列表响应模型
+    """
+    list: list[HistoryNewsItemResponse]
+    total: int
+    has_more: bool = Field(alias="hasMore")
+
+    model_config = ConfigDict(
+        populate_by_name=True,
+        from_attributes=True,
+    )
+```
+
+最后在路由函数中调用，将联表查询返回的三元组 `(news, view_time, history_id)` 通过列表推导式转成字典格式：
+
+```python
+@router.get("/list")
+async def get_history_list(
+        page: int = Query(1, ge=1),
+        page_size: int = Query(10, ge=1, le=100, alias="pageSize"),
+        user: User = Depends(get_current_user),
+        db: AsyncSession = Depends(get_database)
+):
+    total, rows = await history.get_history_list(db, user.id, page, page_size)
+    history_list = [
+        {
+            "id": news.id,
+            "title": news.title,
+            "description": news.description,
+            "image": news.image,
+            "author": news.author,
+            "categoryId": news.category_id,
+            "views": news.views,
+            "publishedTime": news.publish_time,
+            "viewTime": view_time,
+            "historyId": history_id
+        } for news, view_time, history_id in rows
+    ]
+    has_more = total > page * page_size
+    data = HistoryListResponse(
+        total=total,
+        hasMore=has_more,
+        list=history_list
+    )
+    return success_response(message="获取浏览历史成功", data=data)
+```
+
+这里 `rows` 的每个元素是三元组 `(News对象, view_time, history_id)`，列表推导式遍历三元组，把每个 News 对象的属性一一映射到字典里，再加上浏览时间 `viewTime` 和浏览记录 ID `historyId`，最终以 `HistoryListResponse` 格式返回。
+
+
+#### （3）删除单条浏览历史
+
+大致思路：进入请求→验证用户是否登录→根据用户ID和新闻ID删除对应记录→检查是否命中→响应结果
+
+在crud/history.py中定义`remove_history()`：
+
+```python
+async def remove_history(db: AsyncSession,
+                         user_id: int,
+                         news_id: int
+):
+    """删除单条浏览记录"""
+    stmt = delete(History).where(
+        History.user_id == user_id,
+        History.news_id == news_id
+    )
+    result = await db.execute(stmt)
+    await db.commit()
+    return result.rowcount > 0
+```
+
+这里使用 `delete(History).where(...)` 直接删除符合条件的记录。两个条件用逗号分隔（AND 逻辑），确保只删除**当前用户**的**指定新闻**浏览记录。
+
+返回值 `result.rowcount > 0` 表示是否真的有记录被删除。如果用户没有浏览过该新闻，`rowcount` 为 0，返回 `False`。
+
+路由函数：
+
+```python
+@router.delete("/remove")
+async def remove_history(
+        news_id: int = Query(..., alias="newsId"),
+        user: User = Depends(get_current_user),
+        db: AsyncSession = Depends(get_database)
+):
+    result = await history.remove_history(db, user.id, news_id)
+    if not result:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="浏览记录不存在")
+    return success_response(message="删除浏览记录成功", data=result)
+```
+
+这里 `news_id` 是查询参数（`Query`），从 URL `?newsId=xxx` 传入。如果删除失败（记录不存在），抛出 404 异常。
+
+
+#### （4）清空浏览历史
+
+大致思路：进入请求→验证用户是否登录→删除当前用户的所有浏览记录→返回删除条数→响应结果
+
+在crud/history.py中定义`remove_all_history()`：
+
+```python
+async def remove_all_history(
+        db: AsyncSession,
+        user_id: int
+):
+    """清空浏览历史"""
+    stmt = delete(History).where(History.user_id == user_id)
+    result = await db.execute(stmt)
+    await db.commit()
+    return result.rowcount or 0
+```
+
+`delete(History).where(...)`：**先筛选再删除**，只清空当前用户的记录，不会误删别人的浏览历史。
+
+`result.rowcount or 0`：返回本次操作影响的行数。如果该用户没有任何浏览记录，`rowcount` 可能为 `None`，用 `or 0` 兜底，保证返回数字 0。
+
+路由函数：
+
+```python
+@router.delete("/clear")
+async def clear_history(
+        user: User = Depends(get_current_user),
+        db: AsyncSession = Depends(get_database)
+):
+    count = await history.remove_all_history(db, user.id)
+    return success_response(message=f"清空了{count}条浏览记录")
+```
+
+这里和清空收藏列表思路一致——不需要任何前端参数，只依赖 Token 拿到的 `user.id` 就能定位到该用户的所有记录。返回消息用 f-string 把删除条数带出来，方便前端展示提示信息。
+
+**清空浏览历史 vs 删除单条浏览历史对比**：
+
+| 对比维度 | 删除单条 | 清空全部 |
+| -------- | -------- | -------- |
+| 方法 | `@router.delete("/remove")` | `@router.delete("/clear")` |
+| 是否需要参数 | 需要 `newsId` 查询参数 | 不需要，只依赖登录用户 |
+| WHERE 条件 | `user_id + news_id` | 仅 `user_id` |
+| 未找到时的处理 | 抛 404 异常 | 返回 count = 0（不报错） |
