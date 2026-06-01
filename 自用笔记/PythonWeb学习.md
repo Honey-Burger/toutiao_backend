@@ -3291,3 +3291,67 @@ async def clear_history(
 | 是否需要参数 | 需要 `newsId` 查询参数 | 不需要，只依赖登录用户 |
 | WHERE 条件 | `user_id + news_id` | 仅 `user_id` |
 | 未找到时的处理 | 抛 404 异常 | 返回 count = 0（不报错） |
+
+
+
+
+
+### 9、缓存模块
+
+#### （1）缓存简介及安装Redis服务端
+
+**数据缓存**：缓存是一种存储机制，用于临时存储数据或计算结果，当再次需要这些数据时，可以快速从缓存中检索，而不是重新进行耗时或昂贵的获取和计算过程。
+
+在网站开发中，缓存（Cache）是一个非常重要的概念，其核心作用是提高性能、降低延迟和减轻服务器负载。
+
+主要优势：提升性能和用户体验；减轻服务器/数据库负载；降低网络延迟；节省资源和成本。
+
+**Redis**：Redis是一种高性能的Key-Value存储系统，它将数据存储在内存中，因此读写速度极快，非常适合作为应用层的缓存服务。
+
+在FastAPI这样的额后端框架中，通常在应用层使用像Redis这样的内存数据存储作为缓存。
+
+安装自己上网找教程。
+
+#### （2）配置Redis客户端
+
+首先安装 Redis 的 Python 异步客户端：
+
+```bash
+pip install redis
+```
+
+然后在 config 文件夹下创建 `cache_conf.py`，配置 Redis 连接：
+
+```python
+import redis.asyncio as redis
+
+REDIS_HOST = "localhost"
+REDIS_PORT = 6379
+REDIS_DB = 0
+#创建 Redis 的连接对象
+redis_client = redis.Redis(
+    host=REDIS_HOST,#Redis 服务器的主机名或 IP 地址
+    port=REDIS_PORT,#Redis 服务器的端口号
+    db=REDIS_DB,#Redis 数据库的索引
+
+    decode_responses=True#告诉 Redis 返回的字符串结果，而不是字节结果
+)
+```
+
+**参数说明**：
+
+| 参数               | 说明                                                         |
+| ------------------ | ------------------------------------------------------------ |
+| `host`             | Redis 服务器地址，本地用 `localhost`                         |
+| `port`             | Redis 端口号，默认 `6379`                                    |
+| `db`               | Redis 数据库编号（0-15），默认 `0`                           |
+| `decode_responses` | **设为 True** → 返回的数据自动转成 Python 字符串，否则返回 bytes（字节） |
+
+**重点**：`import redis.asyncio as redis`
+
+- 这里是**异步版本**的 Redis 客户端，FastAPI 是异步框架，必须用异步 Redis，否则会阻塞整个事件循环。
+- 同步版本是 `import redis`，异步版本是 `import redis.asyncio`。
+
+**decode_responses 的作用**：
+
+如果不设置 `decode_responses=True`，从 Redis 取出来的数据都是 `b"xxx"` 这种 bytes 格式，每次都要手动 `.decode()`，很麻烦。设为 True 之后直接拿到字符串，省事。
