@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, Query, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config.db_config import get_database
-from crud import news
+from crud import news,news_cache
 from models.users import User
 from schemas.favorite import FavoriteAddRequest
 from utils.auth import get_current_user
@@ -20,7 +20,7 @@ async def get_categories(
         db: AsyncSession = Depends(get_database)
 ):
     #先获取数据库里面新闻分类数据 →先定义模型类 → 封装查询数据方法
-    categories = await news.get_categories(db, skip, limit)
+    categories = await news_cache.get_categories(db, skip, limit)
     return {
         "code": 200,
         "message": "获取新闻分类成功",

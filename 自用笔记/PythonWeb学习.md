@@ -3355,3 +3355,313 @@ redis_client = redis.Redis(
 **decode_responses 的作用**：
 
 如果不设置 `decode_responses=True`，从 Redis 取出来的数据都是 `b"xxx"` 这种 bytes 格式，每次都要手动 `.decode()`，很麻烦。设为 True 之后直接拿到字符串，省事。
+
+
+
+#### （3）封装缓存操作方法
+
+**封装缓存操作**：缓存操作就是围绕Redis做”存、取、删、判断、过期”等操作，让数据访问更快、数据库压力更小。
+
+Redis存储数据：key - value
+
+|  方法  |                   参数                   |                 描述                 |
+| :----: | :--------------------------------------: | :----------------------------------: |
+| setex  | key: str, expire:int（秒）, value(): str |        设置缓存并指定过期时间        |
+|  get   |                 key: str                 | 获取缓存值。若缓存值不存在，返回None |
+| delete |                 key: str                 |           删除指定的缓存键           |
+| exists |                 key: str                 |    检查缓存键是否存在，返回布尔值    |
+
+但在实际项目中，**不能每次都裸写 Redis 命令**。我们需要在 `config/cache_conf.py` 中对这些基础操作进行封装，好处有三点：
+
+1. **统一错误处理**：Redis 连接可能断、数据可能损坏，封装后在函数内部统一 try/except，调用方不需要每次都写异常处理。
+2. **屏蔽数据类型差异**：Redis 只存字符串，但我们经常要存字典/列表。封装后调用方只需传 Python 对象，序列化/反序列化都在函数内部自动处理。
+3. **代码复用**：所有模块共用一套缓存函数，修改时只改一处。
+
+---
+
+首先，在文件顶部导入必要的包：
+
+```python
+import json
+from typing import Any
+
+import redis.asyncio as redis
+```
+
+**`json`**：用来将 Python 字典/列表 与 JSON 字符串互相转换（序列化 & 反序列化）。
+
+**`typing.Any`**：Any 类型的参数/返回值不做类型检查，适合像 value 这种可能是字符串、也可能是字典或列表的场景。
+
+---
+
+**① 读取缓存 — 字符串：`get_cache()`**
+
+```python
+#读取：字符串
+async def get_cache(key: str):
+    try:#有可能获取不到
+        return await redis_client.get(key)
+    except Exception as e:
+        print(f”获取缓存失败:{e}”)
+        return None
+```
+
+**逐行解析**：
+
+- `async def`：因为用的是异步 Redis 客户端，函数必须是异步的，否则 `await` 不生效。
+- `key: str`：指定参数类型为字符串，Redis 的 key 都是字符串。
+- `try...except`：因为网络波动、Redis 宕机等原因可能取不到数据，用 try 包裹，避免整个请求崩溃。
+- `await redis_client.get(key)`：调用 Redis 的 GET 命令，异步等待结果返回。
+- `except Exception as e`：捕获所有异常，打印错误信息，返回 `None`。**注意**：这里的 Exception 捕获范围较大，正式项目建议细化异常类型（如 `redis.ConnectionError`）。
+- 返回值：成功返回缓存值（字符串），失败返回 `None`。
+
+**使用场景**：适合存储简单的字符串数据，比如 Token、验证码、配置项等。
+
+---
+
+**② 读取缓存 — 字典/列表：`get_json_cache()`**
+
+```python
+#读取：列表或字典
+async def get_json_cache(key: str):
+    try:
+        data = await redis_client.get(key)
+        if data:
+            return json.loads(data)
+        return None
+    except Exception as e:
+        print(f”获取缓存失败:{e}”)
+        return None
+```
+
+**逐行解析**：
+
+- `data = await redis_client.get(key)`：先从 Redis 取出数据。此时 data 是**字符串**类型（因为设置了 `decode_responses=True`）。
+- `if data:`：如果 key 不存在，Redis 返回 `None`，直接 pass 掉，返回 `None`。
+- `return json.loads(data)`：**核心步骤**——将 JSON 字符串反序列化为 Python 对象（字典或列表）。
+- `return None`：如果 data 为空（key 不存在），直接返回 None。
+
+**`json.loads()` vs `json.dumps()`**：
+
+| 函数          | 方向                  | 示例                                               |
+| ------------- | --------------------- | -------------------------------------------------- |
+| `json.loads`  | **字符串 → Python对象** | `'{“name”:”张三”}'` → `{“name”:”张三”}`            |
+| `json.dumps`  | **Python对象 → 字符串** | `{“name”:”张三”}` → `'{“name”:”张三”}'`            |
+
+**使用场景**：适合存储有结构的数据，比如新闻列表（list）、用户信息（dict）等。从缓存取出来后直接就能用 Python 对象操作。
+
+---
+
+**③ 设置缓存：`set_cache()`**
+
+```python
+#设置缓存 setex(key, expire, value)
+async def set_cache(key: str, value: Any, expire: int = 3600):
+    try:
+        if isinstance(value,(dict, list)):#如果是字典或列表
+            #转字符串再存储
+            value = json.dumps(value, ensure_ascii=False)#不转码，存储中文
+        await redis_client.setex(key, expire, value)
+        return True
+    except Exception as e:
+        print(f”设置缓存失败:{e}”)
+        return False
+```
+
+**逐行解析**：
+
+- `value: Any`：value 可以是任意类型——字符串、数字、字典、列表等等。Any 表示不做类型限制。
+- `expire: int = 3600`：过期时间，单位**秒**，默认 3600 秒（1 小时）。过期后 Redis 自动删除该 key，防止内存被撑满。
+- `isinstance(value, (dict, list))`：**判断 value 是不是字典或列表**。如果是，就需要先转成 JSON 字符串再存，因为 Redis 只认字符串。
+- `json.dumps(value, ensure_ascii=False)`：
+  - `json.dumps()`：将 Python 对象转为 JSON 字符串。
+  - `ensure_ascii=False`：**关键参数**！默认为 True，会把中文转成 `\uxxxx` 这种 Unicode 转义序列（比如 `”张三”` → `”张三”`）。设为 False 后直接存储原始中文，可读性好、也方便调试时直接在 Redis 里查看。
+- `await redis_client.setex(key, expire, value)`：调用 Redis 的 SETEX 命令，**一次性完成”设值 + 设过期时间”**。等价于先 SET 再 EXPIRE，但 SETEX 是原子操作，更安全。
+- 返回值：成功返回 `True`，失败返回 `False`。布尔类型的返回值方便调用方判断操作是否成功。
+
+**重点：为什么要用 `isinstance` 做类型判断？**
+
+因为 Redis 的 `setex` 要求 value 必须是字符串。如果你传一个 `{“name”: “张三”}` 这种字典进去，Redis 会直接报错。所以我们在函数内部自动判断：如果发现是字典/列表，先用 `json.dumps` 转成字符串再存，调用方完全不用关心这个细节。
+
+**`ensure_ascii=False` 对比**：
+
+```python
+# ensure_ascii=True（默认）
+json.dumps({“name”: “张三”})  # → '{“name”: “\\u5f20\\u4e09”}'
+
+# ensure_ascii=False
+json.dumps({“name”: “张三”}, ensure_ascii=False)  # → '{“name”: “张三”}'
+```
+
+---
+
+**④ 三个函数的协作流程**
+
+用一个典型场景串联三个函数 —— 获取新闻列表时，先查缓存，缓存没有再查数据库：
+
+```python
+# 1. 先从缓存拿
+cached_data = await get_json_cache(“news_list:tech:page1”)
+if cached_data:
+    return cached_data  # 缓存命中，直接返回，不走数据库
+
+# 2. 缓存没命中，查数据库
+news_from_db = await query_database(...)
+
+# 3. 把查到的数据写进缓存（下次就能命中）
+await set_cache(“news_list:tech:page1”, news_from_db, expire=600)
+
+return news_from_db
+```
+
+**流程图**：
+
+```
+前端请求
+   ↓
+查缓存（get_json_cache）
+   ↓ 命中 → 直接返回（快！）
+   ↓ 未命中
+查数据库（慢）
+   ↓
+写缓存（set_cache，下次就快了）
+   ↓
+返回数据给前端
+```
+
+这就是经典的 **Cache-Aside 模式**（旁路缓存），也是后端开发中最常用的缓存策略。
+
+---
+
+**⑤ 缓存的 Key 命名规范**
+
+从上面的例子可以注意到 key 写成 `”news_list:tech:page1”`，而不是简单的 `”news”`。良好的 key 命名规范可以避免 Key 冲突、方便管理和调试：
+
+| 命名规则     | 示例                           | 说明                       |
+| ------------ | ------------------------------ | -------------------------- |
+| 用冒号分层   | `news:list:1:10`               | 类似目录结构，Redis 可视化工具会按层级展示 |
+| 包含业务模块 | `user:token:13`                | 一眼看出是哪个模块的数据   |
+| 包含关键参数 | `news:detail:5`                | 避免不同参数的缓存互相覆盖 |
+| 避免过长     | 不建议超过 100 字符            | 太长浪费内存，可读性也差   |
+
+---
+
+**⑥ 异常处理的重要性**
+
+三个函数都包裹了 `try/except`，因为 Redis 是**外部服务**，随时可能出现：
+
+- 网络闪断
+- Redis 进程挂了
+- 内存满了写不进去
+- 连接池耗尽
+
+如果不对这些异常做兜底，**一次 Redis 故障就会导致整个接口 500 报错**。封装后，即使 Redis 挂了，也只是拿不到缓存数据，业务逻辑可以降级走数据库查询，不会影响核心功能。这就是所谓的**降级容错**——外部依赖出问题时，系统依然能正常运行。
+
+
+
+
+
+#### （4）设计缓存策略
+
+旁路缓存策略（Cache-Aside）是一种常见的缓存策略。其核心概念是应用程序主动管理缓存，**在读取数据时先检查缓存**。如果缓存中没有命中，则从数据库或其他数据源加载数据，并将数据存入缓存；当**数据更新或删除时，应用程序也负责更新或删除缓存中的数据**。
+
+今天以"获取新闻分类"接口为例，走通"查缓存 → 未命中 → 查数据库 → 写缓存 → 返回"的完整链路。
+
+---
+
+**为什么需要单独抽一层缓存文件**
+
+直接在路由函数里调用 `get_json_cache` / `set_cache` 也能跑，但有几个问题：路由会变臃肿；每个接口都要重复写"先查缓存再查库"的逻辑；Key 散落在各处容易写错。所以采用分层：
+
+```
+cache/news_cache.py      →  管理缓存 Key 和读写（缓存层）
+crud/news_cache.py       →  业务逻辑 + 缓存策略判断（CRUD 层）
+routers/news.py          →  接收请求、调用 CRUD、返回响应（路由层）
+```
+
+---
+
+**缓存层 — `cache/news_cache.py`**
+
+这一层只做 Key 常量化 + 包装读写。过期时间参考：分类 7200s / 列表 600s / 详情 1800s / 验证码 120s，数据越稳定越持久。
+
+```python
+from typing import List, Dict, Any
+from config.cache_conf import set_cache, get_json_cache
+
+CATEGORIES_KEY = "news:categories"
+
+async def get_cached_categories():
+    return await get_json_cache(CATEGORIES_KEY)
+
+async def set_cached_categories(data: List[Dict[str, Any]], expire: int = 7200):
+    return await set_cache(CATEGORIES_KEY, data, expire)
+```
+
+---
+
+**CRUD 层 — `crud/news_cache.py`（Cache-Aside 核心）**
+
+```python
+from fastapi.encoders import jsonable_encoder
+from cache.news_cache import get_cached_categories, set_cached_categories
+
+async def get_categories(db: AsyncSession, skip: int = 0, limit: int = 10):
+    # 1. 先查缓存
+    cached = await get_cached_categories()
+    if cached:
+        print(f"✅ 命中缓存")
+        return cached
+
+    print("❌ 缓存未命中，查询数据库...")
+
+    # 2. 查数据库
+    stmt = select(Category).offset(skip).limit(limit)
+    result = await db.execute(stmt)
+    categories = result.scalars().all()
+
+    # 3. 写缓存（注意：空数据不写入，防止缓存穿透）
+    if categories:
+        categories_encoded = jsonable_encoder(categories)
+        await set_cached_categories(categories_encoded)
+
+    return categories
+```
+
+**流程**：查缓存 → 命中直接返回 → 未命中查数据库 → 有数据写缓存 → 返回。
+
+两个重点：
+
+`jsonable_encoder`：查出来的 `categories` 是 ORM 对象列表，不能直接 JSON 序列化存 Redis。`jsonable_encoder` 是 FastAPI 内置函数，把 ORM 对象递归转成 JSON 兼容的字典列表，之后 `json.dumps` 才能正常处理。
+
+空数据不写缓存：如果数据库返回空列表 `[]` 也写进 Redis，下次请求缓存命中直接返回空，永远查不到后来新增的数据，这就是**缓存穿透**。所以只有确实查到数据才写缓存。
+
+路由层只需把调用从 `news.get_categories` 改成 `news_cache.get_categories` 即可，其他不变。
+
+---
+
+**RESP3 协议踩坑 — `protocol = 2`**
+
+今天配置 Redis 客户端时遇到了一个坑。`redis-py` 5.0 以上版本默认使用 RESP3 协议（`protocol=3`），但 RESP3 的响应格式和 RESP2 不同，会导致 `setex` 等方法返回的结果类型发生变化，代码直接报错无法运行。当时报的错误跟返回值解析有关，查了半天才发现是协议版本的问题。
+
+解决方式：在 `redis.Redis()` 连接参数里显式指定 `protocol = 2`，强制使用 RESP2：
+
+```python
+redis_client = redis.Redis(
+    host=REDIS_HOST,
+    port=REDIS_PORT,
+    db=REDIS_DB,
+    decode_responses=True,
+    protocol=2   # 强制 RESP2，解决 RESP3 兼容问题
+)
+```
+
+RESP2 vs RESP3：
+
+| 协议 | 特点 |
+| ---- | ---- |
+| RESP2（`protocol=2`） | 经典协议，所有版本都兼容，稳定可靠 |
+| RESP3（`protocol=3`） | redis-py 5.0+ 默认，返回格式有变化，部分场景不兼容 |
+
+**总结**：当前环境（redis-py 5.x）下，配上 `protocol=2` 才能正常运行。以后如果 redis-py 新版对 RESP3 的支持更完善了，可以再去掉这行。
+
