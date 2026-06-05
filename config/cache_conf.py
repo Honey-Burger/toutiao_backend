@@ -17,6 +17,7 @@ redis_client = redis.Redis(
 )
 
 #设置 和 读取（字符串 和 列表或字典这两个方法） "[{}]"
+
 #读取：字符串
 async def get_cache(key: str):
     try:#有可能获取不到
@@ -30,7 +31,7 @@ async def get_json_cache(key: str):
     try:
         data = await redis_client.get(key)
         if data:
-            return json.loads(data)
+            return json.loads(data)#把json字符串转Python字典
         return None
     except Exception as e:
         print(f"获取缓存失败:{e}")

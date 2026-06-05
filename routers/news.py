@@ -43,7 +43,7 @@ async def get_news_list(
     offset = (page - 1) * page_size
 
     # 调用DAO层方法：查询当前页的新闻列表
-    news_list = await news.get_news_list(db, category_id, offset, page_size)
+    news_list = await news_cache.get_news_list(db, category_id, offset, page_size)
 
     # 调用DAO层方法：统计该分类下新闻总条数
     total = await news.get_news_count(db, category_id)

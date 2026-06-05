@@ -703,7 +703,7 @@ async def create_tables():
 - **自动打开资源**（文件 / 数据库连接）
 - **自动关闭资源**（不用手动关）
 - 安全、不报错、不占内存
-- ​
+- 
 
 解释：`await conn.run_sync(Base.metadata.create_all)`
 
@@ -3664,4 +3664,194 @@ RESP2 vs RESP3：
 | RESP3（`protocol=3`） | redis-py 5.0+ 默认，返回格式有变化，部分场景不兼容 |
 
 **总结**：当前环境（redis-py 5.x）下，配上 `protocol=2` 才能正常运行。以后如果 redis-py 新版对 RESP3 的支持更完善了，可以再去掉这行。
+
+
+
+#### （5）缓存新闻列表
+
+这一节是缓存实战的进阶内容。和上一节"分类缓存"不同，新闻列表的缓存涉及**分页参数**、**更复杂的数据类型转换**、以及**列表推导式**的大量使用，第一次接触会非常绕。
+
+---
+
+**① 新闻列表缓存的 Key 设计**
+
+新闻列表比分类缓存多了一个关键问题：**同一分类、不同页码、不同页面大小，是不同的数据**。所以 Key 必须包含这些参数：
+
+```python
+NEWS_LIST_PREFIX = "news:list:"
+
+# Key 格式：news:list:{分类ID}:{页码}:{每页数量}
+# 示例：
+#   news:list:1:1:10   → 分类1，第1页，每页10条
+#   news:list:all:2:20 → 全部分类，第2页，每页20条
+
+async def set_cached_news_list(category_id, page, size, news_list, expire=600):
+    category_part = category_id if category_id is not None else "all"
+    key = f"{NEWS_LIST_PREFIX}{category_part}:{page}:{size}"
+    return await set_cache(key, news_list, expire)
+```
+
+注意：参数里传入的是 `page`（页码），而不是 `skip`（跳过条数）。因为缓存 Key 应该用业务语义（第几页），而不是计算后的偏移量。在 CRUD 层做了转换：`page = skip // limit + 1`。
+
+---
+
+**② 本节最绕的部分：新闻列表写入缓存的数据类型全链路**
+
+这是今天最难理解的地方。数据从数据库查出来到最终存进 Redis，经历了多次"变形"。核心代码在 `crud/news_cache.py` 第 97 行：
+
+```python
+news_data = [NewsItemBase.model_validate(item).model_dump(mode="json", by_alias=False) for item in news_list]
+```
+
+拆解这个列表推导式，每一步都在做类型转换：
+
+```python
+# 假设 news_list 是数据库查出来的 ORM 对象列表
+# news_list = [<News id=1 title='xxx'>, <News id=2 title='yyy'>, ...]
+
+news_data = []  # 最终要写入 Redis 的字典列表
+
+for item in news_list:
+    # item 是 SQLAlchemy ORM 对象，比如 <News id=1 title='xxx' category_id=2>
+
+    # 第 1 步：ORM → Pydantic 模型
+    # NewsItemBase.model_validate(item) 把 ORM 对象转成 Pydantic 对象
+    # 为什么能转？因为 NewsItemBase 配置了 from_attributes=True，
+    # 它可以直接从 ORM 对象的属性里读取值
+    pydantic_obj = NewsItemBase.model_validate(item)
+    # → NewsItemBase(id=1, title='xxx', category_id=2, publish_time=datetime(...))
+
+    # 第 2 步：Pydantic 模型 → 字典
+    # .model_dump(mode="json", by_alias=False) 把 Pydantic 对象转成普通字典
+    # mode="json"  : 把 datetime 等特殊类型转成 JSON 兼容格式（ISO 8601 字符串）
+    #                比如 datetime(2024,1,1) → "2024-01-01T00:00:00"
+    # by_alias=False: 用 Python 风格字段名（category_id），不用前端风格（categoryId）
+    dict_item = pydantic_obj.model_dump(mode="json", by_alias=False)
+    # → {"id": 1, "title": "xxx", "category_id": 2, "publish_time": "2024-01-01T00:00:00", ...}
+
+    news_data.append(dict_item)
+
+# news_data = [
+#     {"id": 1, "title": "xxx", "category_id": 2, "publish_time": "2024-01-01T00:00:00", ...},
+#     {"id": 2, "title": "yyy", "category_id": 2, "publish_time": "2024-01-02T00:00:00", ...},
+# ]
+```
+
+然后 `news_data` 被传给 `set_cached_news_list()` → `set_cache()` → `json.dumps()` 变成 JSON 字符串 → `redis_client.setex()` 写入 Redis。
+
+---
+
+**③ 为什么新闻列表不用 `jsonable_encoder`，而用 Pydantic 的 `model_validate + model_dump`？**
+
+上一节分类缓存用的是 FastAPI 内置的 `jsonable_encoder(categories)`，一句话就搞定了。但新闻列表用了更复杂的 Pydantic 方式，原因是对比：
+
+| 对比维度 | `jsonable_encoder` | `model_validate + model_dump` |
+|---------|-------------------|------------------------------|
+| 来源 | FastAPI 内置 | Pydantic |
+| 字段控制 | 所有字段都转，无法筛选 | 只转 Schema 里定义的字段（精准控制） |
+| 类型转换 | 自动处理 | `mode="json"` 精确控制（如 datetime → ISO 字符串） |
+| 别名控制 | 不支持 | `by_alias` 精确控制字段名风格 |
+| 适用场景 | 简单场景，字段少 | 复杂场景，需要字段筛选和精确类型控制 |
+
+新闻列表用 Pydantic 方式的好处：ORM 模型里有很多字段（`created_at`、`updated_at`、`content` 全文等），但缓存只需要 Schema 定义的几个核心字段，不会把冗余数据存进 Redis，节省内存。
+
+---
+
+**④ 新闻列表读取缓存（写入的逆过程）**
+
+```python
+# crud/news_cache.py
+page = skip // limit + 1                           # offset → 页码
+cached_list = await get_cache_news_list(category_id, page, limit)
+if cached_list:
+    return cached_list  # 直接返回字典列表，FastAPI 也能处理
+```
+
+读取链路：Redis → `redis_client.get()` → JSON 字符串 → `json.loads()` → Python 字典列表 → 直接返回。
+
+**关键理解**：缓存读出来的数据是**字典列表** `[{"id": 1, ...}, ...]`，不是 ORM 对象。但因为 FastAPI 返回响应时会自动序列化字典为 JSON，所以不需要再转回 ORM 对象。这就是为什么 `return cached_list` 可以直接用。
+
+---
+
+**⑤ 数据全链路总结（写入 + 读取一张图）**
+
+```
+【写入缓存】                              【读取缓存】
+数据库 ORM 对象                            Redis
+    │                                        │
+    │ model_validate()                  redis_client.get()
+    ↓                                        ↓
+Pydantic 模型                            JSON 字符串
+    │                                        │
+    │ model_dump(mode="json")            json.loads()
+    ↓                                        ↓
+Python 字典列表                           Python 字典列表
+    │                                        │
+    │ json.dumps()                        直接 return
+    ↓                                        ↓
+JSON 字符串                              FastAPI 响应给前端
+    │
+    │ redis_client.setex()
+    ↓
+  Redis
+```
+
+记住这四步口诀：
+- **写入**：ORM → Pydantic → 字典 → JSON 字符串 → Redis
+- **读取**：Redis → JSON 字符串 → 字典 → 直接返回
+
+---
+
+**⑥ 列表推导式的阅读技巧**
+
+今天代码里出现了大量列表推导式，比如 `get_related_news` 里的这个：
+
+```python
+return [
+    {
+        "id": news_detail.id,
+        "title": news_detail.title,
+        "content": news_detail.content,
+        "image": news_detail.image,
+        "author": news_detail.author,
+        "publishTime": news_detail.publish_time,
+        "categoryId": news_detail.category_id,
+        "views": news_detail.views
+    }
+    for news_detail in related_news
+]
+```
+
+阅读技巧：**先看 `for` 后面，再看 `for` 前面**。
+
+1. `for news_detail in related_news` → 遍历 ORM 对象列表，每个元素叫 `news_detail`
+2. `{ "id": news_detail.id, ... }` → 对每个元素，提取属性变成一个新字典
+
+等价于传统写法：
+
+```python
+result = []
+for news_detail in related_news:
+    result.append({
+        "id": news_detail.id,
+        "title": news_detail.title,
+        # ...
+    })
+return result
+```
+
+更复杂的如第 97 行的嵌套调用 `NewsItemBase.model_validate(item).model_dump(...)`，拆解方法一样：**从内到外、从左到右**，一步步拆开就清晰了。
+
+---
+
+**⑦ 本节涉及的缓存过期时间参考**
+
+| 数据类型 | 过期时间 | 原因 |
+|---------|---------|------|
+| 新闻分类 | 7200s（2小时） | 分类几乎不变，可以缓存很久 |
+| 新闻列表 | 600s（10分钟） | 新文章会发布，需要相对及时更新 |
+| 新闻详情 | 1800s（30分钟） | 浏览量会变，但不需要实时 |
+| 验证码 | 120s（2分钟） | 安全敏感，必须短 |
+
+原则：**数据越稳定，缓存越持久**。同时要避免所有 Key 设置相同的过期时间，防止同一时刻大量缓存同时失效（缓存雪崩）。
 
